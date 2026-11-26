@@ -1115,11 +1115,11 @@ def get_spread_fun(surface_wind_speed,p=0.894):
     stability = stability_fun(surface_wind_speed)
     return lambda dist: stability*(dist/1000.0)**p
 
-def include_cross_along_for_wind(wind,overpass,coord,location_correction=True,
-                                 print_correction=False):
+def include_cross_along_for_wind(wind,overpass,coord,location_correction=True,print_correction=False):
     wind = get_local_wind(wind,coord)
     if wind is None:
         return None
+    wind_variables = list(wind.variables.keys())
     local_overpass = get_local_overpass(overpass,coord)
     if local_overpass is None:
         return None
@@ -1128,10 +1128,18 @@ def include_cross_along_for_wind(wind,overpass,coord,location_correction=True,
     wlon, wlat = wind['lon'].data, wind['lat'].data
     wind_coords = np.column_stack((wlon.flatten(),wlat.flatten()))
     wlon_min, wlon_max = min(wlon.min(),overpass['lon'].min()), max(wlon.max(),overpass['lon'].max())
-    Ueff, Veff = wind['U_GNFR_A'].data[0,:,:], wind['V_GNFR_A'].data[0,:,:]
-    U10m, V10m = wind['U_10M'].data[0,:,:], wind['V_10M'].data[0,:,:]
-    U, V = wind['U'].data[0,:,:,:], wind['V'].data[0,:,:,:]
-    
+    if 'U_GNFR_A' in wind_variables and 'V_GNFR_A' in wind_variables:
+        Ueff, Veff = wind['U_GNFR_A'].data[0,:,:], wind['V_GNFR_A'].data[0,:,:]
+    elif ('U_GNFR_A' in wind_variables and 'V_GNFR_A' not in wind_variables) or ('U_GNFR_A' not in wind_variables and 'V_GNFR_A' in wind_variables):
+        raise ValueError("Missing 'U_GNFR_A' or 'V_GNFR_A' component of the wind")
+    if 'U_10M' in wind_variables and 'V_10M' in wind_variables:
+        U10m, V10m = wind['U_10M'].data[0,:,:], wind['V_10M'].data[0,:,:]
+    elif ('U_10M' in wind_variables and 'V_10M' not in wind_variables) or ('U_10M' not in wind_variables and 'V_10M' in wind_variables):
+        raise ValueError("Missing 'U_10M' or 'V_10M' component of the wind")
+    if 'U' in wind_variables and 'V' in wind_variables:
+        U, V = wind['U'].data[0,:,:,:], wind['V'].data[0,:,:,:]
+    elif ('U' in wind_variables and 'V' not in wind_variables) or ('U' not in wind_variables and 'V' in wind_variables):
+        raise ValueError("Missing 'U' or 'V' component of the wind")
     center_line_lat_interpolator = compute_along_track(overpass,return_interpolator=True)
     center_longitudes = overpass['lon'].mean(dim='nrows').data
     along_track_coords = np.column_stack((center_longitudes,center_line_lat_interpolator(center_longitudes)))
@@ -1150,10 +1158,15 @@ def include_cross_along_for_wind(wind,overpass,coord,location_correction=True,
     
     # For each wind field (lon,lat)-coordinate, find the location on the center line with minimal distance
     cross_track, along_track = np.zeros(wind_shape,dtype=np.float32), np.zeros(wind_shape,dtype=np.float32)
-    VX = np.zeros((1,wind.dims['level'],wind_shape[0],wind_shape[1]),dtype=np.float32)
-    VY = np.zeros((1,wind.dims['level'],wind_shape[0],wind_shape[1]),dtype=np.float32)
-    VXeff, VYeff = np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32), np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32)
-    VX10M, VY10M = np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32), np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32)
+    if 'U_GNFR_A' in wind_variables and 'V_GNFR_A' in wind_variables:
+        VXeff = np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32)
+        VYeff = np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32)
+    if 'U_10M' in wind_variables and 'V_10M' in wind_variables:
+        VX10M = np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32)
+        VY10M = np.zeros((1,wind_shape[0],wind_shape[1]),dtype=np.float32)
+    if 'U' in wind_variables and 'V' in wind_variables:
+        VX = np.zeros((1,wind.dims['level'],wind_shape[0],wind_shape[1]),dtype=np.float32)
+        VY = np.zeros((1,wind.dims['level'],wind_shape[0],wind_shape[1]),dtype=np.float32)
     for r in range(wind_shape[0]):
         for c in range(wind_shape[1]):
             wind_coord = (wlon[r,c],wlat[r,c])
@@ -1173,15 +1186,19 @@ def include_cross_along_for_wind(wind,overpass,coord,location_correction=True,
                 nearest_index = np.unravel_index(np.argmin(Earth.inverse(coords,wind_coord)[:,0]),
                                                  (overpass.dims['nobs'],overpass.dims['nrows']))
                 forward_bearing_interp = forward_bearings[nearest_index]
-            #additional_correction = 25.0 # Visually looks better, the wind is rotated to match the plume anyways so does not matter
+            # Visually the wind looks better with this correction but it is rotated to the plume direction anyways
+            #additional_correction = 25.0
             U_angle = np.deg2rad(-forward_bearing_interp)
             V_angle = np.deg2rad(-forward_bearing_interp + 90.0)
-            VXeff[0,r,c] = Ueff[r,c]*np.cos(U_angle) + Veff[r,c]*np.cos(V_angle)
-            VYeff[0,r,c] = Ueff[r,c]*np.sin(U_angle) + Veff[r,c]*np.sin(V_angle)
-            VX10M[0,r,c] = U10m[r,c]*np.cos(U_angle) + V10m[r,c]*np.cos(V_angle)
-            VY10M[0,r,c] = U10m[r,c]*np.sin(U_angle) + V10m[r,c]*np.sin(V_angle)
-            VX[0,:,r,c] = U[:,r,c]*np.cos(U_angle) + V[:,r,c]*np.cos(V_angle)
-            VY[0,:,r,c] = U[:,r,c]*np.sin(U_angle) + V[:,r,c]*np.sin(V_angle)
+            if 'U_GNFR_A' in wind_variables and 'V_GNFR_A' in wind_variables:
+                VXeff[0,r,c] = Ueff[r,c]*np.cos(U_angle) + Veff[r,c]*np.cos(V_angle)
+                VYeff[0,r,c] = Ueff[r,c]*np.sin(U_angle) + Veff[r,c]*np.sin(V_angle)
+            if 'U_10M' in wind_variables and 'V_10M' in wind_variables:
+                VX10M[0,r,c] = U10m[r,c]*np.cos(U_angle) + V10m[r,c]*np.cos(V_angle)
+                VY10M[0,r,c] = U10m[r,c]*np.sin(U_angle) + V10m[r,c]*np.sin(V_angle)
+            if 'U' in wind_variables and 'V' in wind_variables:
+                VX[0,:,r,c] = U[:,r,c]*np.cos(U_angle) + V[:,r,c]*np.cos(V_angle)
+                VY[0,:,r,c] = U[:,r,c]*np.sin(U_angle) + V[:,r,c]*np.sin(V_angle)
  
     if location_correction:
         # Corners of the wind field
@@ -1229,24 +1246,27 @@ def include_cross_along_for_wind(wind,overpass,coord,location_correction=True,
                                        coords={'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
     wind['along_track'] = xr.DataArray(data=along_track,dims=['rlat','rlon'],
                                        coords={'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
-    wind['VX10M'] = xr.DataArray(data=VX10M,dims=['time','rlat','rlon'],
-                                 coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
-    wind['VY10M'] = xr.DataArray(data=VY10M,dims=['time','rlat','rlon'],
-                                 coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
-    wind['VXeff'] = xr.DataArray(data=VXeff,dims=['time','rlat','rlon'],
-                                 coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
-    wind['VYeff'] = xr.DataArray(data=VYeff,dims=['time','rlat','rlon'],
-                                 coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
-    wind['VX'] = xr.DataArray(data=VX,dims=['time','level','rlat','rlon'],
-                              coords={'time': wind['time'].data, 'level': wind['level'].data,
-                                      'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
-    wind['VY'] = xr.DataArray(data=VY,dims=['time','level','rlat','rlon'],
-                              coords={'time': wind['time'].data, 'level': wind['level'].data,
-                                      'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
+    if 'U_GNFR_A' in wind_variables and 'V_GNFR_A' in wind_variables:
+        wind['VXeff'] = xr.DataArray(data=VXeff,dims=['time','rlat','rlon'],
+                                  coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
+        wind['VYeff'] = xr.DataArray(data=VYeff,dims=['time','rlat','rlon'],
+                                  coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
+    if 'U_10M' in wind_variables and 'V_10M' in wind_variables:
+        wind['VX10M'] = xr.DataArray(data=VX10M,dims=['time','rlat','rlon'],
+                                     coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
+        wind['VY10M'] = xr.DataArray(data=VY10M,dims=['time','rlat','rlon'],
+                                     coords={'time': wind['time'].data,'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
+    if 'U' in wind_variables and 'V' in wind_variables:
+        wind['VX'] = xr.DataArray(data=VX,dims=['time','level','rlat','rlon'],
+                                  coords={'time': wind['time'].data, 'level': wind['level'].data,
+                                          'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
+        wind['VY'] = xr.DataArray(data=VY,dims=['time','level','rlat','rlon'],
+                                  coords={'time': wind['time'].data, 'level': wind['level'].data,
+                                          'rlat': wind['rlat'].data, 'rlon': wind['rlon'].data})
     
     bool_arr = (cross_track-wind_center_cross)**2 + (along_track-wind_center_along)**2 < 3.0**2
     surface_wind_speed_near_source = np.mean(np.sqrt(VX10M[0][bool_arr]**2 + VY10M[0][bool_arr]**2))
-    spread_fun = get_spread_fun(surface_wind_speed_near_source)
+    spread_fun = get_spread_fun(surface_wind_speed_near_source,plot_relation=False)
 
     # Create cone for the local overpass
     local_overpass = create_cone(local_overpass,surface_wind_speed_near_source,search_r=0.72)
@@ -1262,10 +1282,13 @@ def include_cross_along_for_wind(wind,overpass,coord,location_correction=True,
     rot = np.arctan2(cone_vec[1],cone_vec[0]) - np.arctan2(VYeff_cone,VXeff_cone)
     rot = rot - 2.0*np.pi*(rot > np.pi) + 2.0*np.pi*(rot < -np.pi)
     if print_correction:
-        print('Local wind rotation:', np.rad2deg(rot))
-    wind['VX10M'], wind['VY10M'] = wind['VX10M']*np.cos(rot)-wind['VY10M']*np.sin(rot), wind['VX10M']*np.sin(rot)+wind['VY10M']*np.cos(rot)
-    wind['VXeff'], wind['VYeff'] = wind['VXeff']*np.cos(rot)-wind['VYeff']*np.sin(rot), wind['VXeff']*np.sin(rot)+wind['VYeff']*np.cos(rot)
-    wind['VX'], wind['VY'] = wind['VX']*np.cos(rot)-wind['VY']*np.sin(rot), wind['VX']*np.sin(rot)+wind['VY']*np.cos(rot)
+        print(f'Local wind rotation: {np.rad2deg(rot):.2f}°')
+    if 'U_GNFR_A' in wind_variables and 'V_GNFR_A' in wind_variables:
+        wind['VXeff'], wind['VYeff'] = wind['VXeff']*np.cos(rot)-wind['VYeff']*np.sin(rot), wind['VXeff']*np.sin(rot)+wind['VYeff']*np.cos(rot)
+    if 'U_10M' in wind_variables and 'V_10M' in wind_variables:
+        wind['VX10M'], wind['VY10M'] = wind['VX10M']*np.cos(rot)-wind['VY10M']*np.sin(rot), wind['VX10M']*np.sin(rot)+wind['VY10M']*np.cos(rot)
+    if 'U' in wind_variables and 'V' in wind_variables:
+        wind['VX'], wind['VY'] = wind['VX']*np.cos(rot)-wind['VY']*np.sin(rot), wind['VX']*np.sin(rot)+wind['VY']*np.cos(rot)
     return wind
 
 def get_psurf_interpolator(overpass,remove_nans=True):
@@ -2477,10 +2500,10 @@ def main_loop(start_date,end_date,co2_noise_scenario='medium',no2_noise_scenario
                         continue
                 overpass = include_cross_along_for_overpass(overpass)
                 wind_file = f'SMARTCARB_winds_{date_str}11.nc'
-                wind_full = xr.open_dataset(os.path.join(WIND_DATA_PATH,wind_file))
-                wind_sliced, overpass = slice_wind(wind_full,overpass)
-                wind_full.close()
-                del wind_full
+                wind_ds = xr.open_dataset(os.path.join(WIND_DATA_PATH,wind_file)).drop_vars(['U','V','HHL'],errors='ignore')
+                wind_sliced, overpass = slice_wind(wind_ds,overpass)
+                wind_ds.close()
+                del wind_ds
                 for source_name in source_names:
                     #print(f'Attempting emission estimation for source {source_name}')
                     output_file.write(f'Attempting emission estimation for source {source_name}\n')
